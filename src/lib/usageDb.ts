@@ -31,6 +31,12 @@ export {
 
 export { calculateCost } from "./usage/costCalculator";
 
-export { getUsageStats } from "./usage/usageStats";
+export { getUsageStats, getApiKeyUsageSummary } from "./usage/usageStats";
 
-export { saveCallLog, rotateCallLogs, getCallLogs, getCallLogById } from "./usage/callLogs";
+export {
+  saveCallLog,
+  rotateCallLogs,
+  getCallLogs,
+  getCallLogById,
+  getFallbackTransparencyMetrics,
+} from "./usage/callLogs";

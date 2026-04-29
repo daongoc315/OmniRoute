@@ -113,7 +113,6 @@ export async function computeAnalytics(
   const byModelMap: Record<string, any> = {};
   const byAccountMap: Record<string, any> = {};
   const byProviderMap: Record<string, any> = {};
-  const byApiKeyMap: Record<string, any> = {};
 
   // ---- Weekly pattern (0=Sun..6=Sat) ----
   const weeklyTokens = [0, 0, 0, 0, 0, 0, 0];
@@ -247,29 +246,6 @@ export async function computeAnalytics(
     byProviderMap[prov].completionTokens += ct;
     byProviderMap[prov].totalTokens += totalTkns;
     byProviderMap[prov].cost += cost;
-
-    // By API key
-    if (entry.apiKeyId || entry.apiKeyName) {
-      const keyName = entry.apiKeyName || entry.apiKeyId || "unknown";
-      const keyLabel = entry.apiKeyId ? `${keyName} (${entry.apiKeyId})` : keyName;
-      if (!byApiKeyMap[keyLabel]) {
-        byApiKeyMap[keyLabel] = {
-          apiKey: keyLabel,
-          apiKeyId: entry.apiKeyId || null,
-          apiKeyName: keyName,
-          requests: 0,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-          cost: 0,
-        };
-      }
-      byApiKeyMap[keyLabel].requests++;
-      byApiKeyMap[keyLabel].promptTokens += pt;
-      byApiKeyMap[keyLabel].completionTokens += ct;
-      byApiKeyMap[keyLabel].totalTokens += totalTkns;
-      byApiKeyMap[keyLabel].cost += cost;
-    }
   }
 
   // ---- Build sorted arrays ----
@@ -297,7 +273,6 @@ export async function computeAnalytics(
 
   const byAccount = Object.values(byAccountMap).sort((a, b) => b.totalTokens - a.totalTokens);
   const byProvider = Object.values(byProviderMap).sort((a, b) => b.totalTokens - a.totalTokens);
-  const byApiKey = Object.values(byApiKeyMap).sort((a, b) => b.totalTokens - a.totalTokens);
 
   // Weekly pattern (avg tokens per day of week)
   const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -339,7 +314,9 @@ export async function computeAnalytics(
     byModel,
     byAccount,
     byProvider,
-    byApiKey,
+    // API-key aggregation is SQL-backed and attached by /api/usage/analytics so chart rows
+    // can stay bounded without changing API-key breakdown semantics.
+    byApiKey: [],
     activityMap,
     weeklyPattern,
     range,

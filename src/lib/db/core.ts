@@ -214,6 +214,9 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_uh_timestamp ON usage_history(timestamp);
   CREATE INDEX IF NOT EXISTS idx_uh_provider ON usage_history(provider);
   CREATE INDEX IF NOT EXISTS idx_uh_model ON usage_history(model);
+  CREATE INDEX IF NOT EXISTS idx_uh_api_key_summary_time
+    ON usage_history(timestamp, api_key_id, api_key_name, provider, model)
+    WHERE api_key_id IS NOT NULL OR api_key_name IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS call_logs (
     id TEXT PRIMARY KEY,

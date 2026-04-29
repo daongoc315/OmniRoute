@@ -1,47 +1,49 @@
 import { NextResponse } from "next/server";
-import { getUsageDb } from "@/lib/usageDb";
+import { getApiKeyUsageSummary, getFallbackTransparencyMetrics, getUsageDb } from "@/lib/usageDb";
 import { computeAnalytics } from "@/lib/usageAnalytics";
-import { getDbInstance } from "@/lib/db/core";
+import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
+import { getUsageRangeStartIso, normalizeUsageRange } from "@/lib/usage/dateRanges";
 
-function getRangeStartIso(range: string): string | null {
-  const end = new Date();
-  const start = new Date(end);
+const MAX_ANALYTICS_CHART_DAYS = 365;
+const MAX_ANALYTICS_CHART_ROWS = 20000;
 
-  switch (range) {
-    case "1d":
-      start.setDate(start.getDate() - 1);
-      break;
-    case "7d":
-      start.setDate(start.getDate() - 7);
-      break;
-    case "30d":
-      start.setDate(start.getDate() - 30);
-      break;
-    case "90d":
-      start.setDate(start.getDate() - 90);
-      break;
-    case "ytd":
-      start.setMonth(0, 1);
-      start.setHours(0, 0, 0, 0);
-      break;
-    case "all":
-    default:
-      return null;
-  }
+type ApiKeyUsageRow = {
+  apiKey: string;
+  apiKeyId: string | null;
+  apiKeyName: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost: number;
+  firstUsed: string | null;
+  lastUsed: string | null;
+};
 
-  return start.toISOString();
+function getChartRangeStartIso(rangeStartIso: string | null): string {
+  const boundedStart = new Date();
+  boundedStart.setDate(boundedStart.getDate() - MAX_ANALYTICS_CHART_DAYS);
+
+  if (!rangeStartIso) return boundedStart.toISOString();
+
+  const rangeStart = new Date(rangeStartIso);
+  if (Number.isNaN(rangeStart.getTime())) return boundedStart.toISOString();
+
+  return rangeStart > boundedStart ? rangeStart.toISOString() : boundedStart.toISOString();
 }
 
 export async function GET(request) {
+  const authError = await requireManagementAuth(request);
+  if (authError) return authError;
+
   try {
     const { searchParams } = new URL(request.url);
-    const range = searchParams.get("range") || "30d";
+    const range = normalizeUsageRange(searchParams.get("range"));
 
-    // Cap history load to last 365 days — the heatmap never looks beyond that,
-    // and all named ranges (1d/7d/30d/90d/ytd) fall within this window.
-    const heatmapSince = new Date();
-    heatmapSince.setDate(heatmapSince.getDate() - 365);
-    const db = await getUsageDb(heatmapSince.toISOString());
+    const rangeStartIso = getUsageRangeStartIso(range);
+    // Keep raw chart data bounded; lifetime aggregates below are SQL-backed.
+    const chartRangeStartIso = getChartRangeStartIso(rangeStartIso);
+    const db = await getUsageDb(chartRangeStartIso, { maxRows: MAX_ANALYTICS_CHART_ROWS });
     const history = db.data.history || [];
 
     // Build connection map for account names
@@ -70,41 +72,37 @@ export async function GET(request) {
 
     const analytics: any = await computeAnalytics(history, range, connectionMap);
 
+    const byApiKeySummary = await getApiKeyUsageSummary({ sinceIso: rangeStartIso });
+    const byApiKeyRows: ApiKeyUsageRow[] = Object.entries(byApiKeySummary)
+      .map(([apiKey, stats]) => ({
+        apiKey,
+        apiKeyId: stats.apiKeyId,
+        apiKeyName: stats.apiKeyName,
+        requests: stats.requests,
+        promptTokens: stats.promptTokens,
+        completionTokens: stats.completionTokens,
+        totalTokens: stats.totalTokens,
+        cost: stats.cost,
+        firstUsed: stats.firstUsed,
+        lastUsed: stats.lastUsed,
+      }))
+      .sort((a, b) => b.totalTokens - a.totalTokens);
+
+    analytics.byApiKey = byApiKeyRows;
+    analytics.summary.uniqueApiKeys = byApiKeyRows.length;
+    analytics.meta = {
+      ...(analytics.meta || {}),
+      range,
+      aggregatesSinceIso: rangeStartIso,
+      chartSinceIso: chartRangeStartIso,
+      chartMaxRows: MAX_ANALYTICS_CHART_ROWS,
+      chartWindowDays: MAX_ANALYTICS_CHART_DAYS,
+      chartDataBounded: range === "all",
+    };
+
     // T01: fallback transparency metrics from call_logs (requested_model vs routed model).
     try {
-      const db = getDbInstance();
-      const sinceIso = getRangeStartIso(range);
-      const whereClause = sinceIso ? "WHERE timestamp >= @since" : "";
-      const row = db
-        .prepare(
-          `
-          SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN requested_model IS NOT NULL AND requested_model != '' THEN 1 ELSE 0 END) as with_requested,
-            SUM(CASE
-              WHEN requested_model IS NOT NULL
-               AND requested_model != ''
-               AND model IS NOT NULL
-               AND requested_model != model
-              THEN 1 ELSE 0 END
-            ) as fallbacks
-          FROM call_logs
-          ${whereClause}
-        `
-        )
-        .get(sinceIso ? { since: sinceIso } : {}) as
-        | { total?: number; with_requested?: number; fallbacks?: number }
-        | undefined;
-
-      const total = Number(row?.total || 0);
-      const withRequested = Number(row?.with_requested || 0);
-      const fallbackCount = Number(row?.fallbacks || 0);
-
-      analytics.summary.fallbackCount = fallbackCount;
-      analytics.summary.fallbackRatePct =
-        withRequested > 0 ? Number(((fallbackCount / withRequested) * 100).toFixed(2)) : 0;
-      analytics.summary.requestedModelCoveragePct =
-        total > 0 ? Number(((withRequested / total) * 100).toFixed(2)) : 0;
+      Object.assign(analytics.summary, getFallbackTransparencyMetrics({ sinceIso: rangeStartIso }));
     } catch {
       analytics.summary.fallbackCount = 0;
       analytics.summary.fallbackRatePct = 0;

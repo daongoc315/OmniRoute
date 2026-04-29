@@ -34,6 +34,27 @@ function createDateFormatter(locale: string, options: Intl.DateTimeFormatOptions
   }
 }
 
+function formatRelativeTime(value?: string | null) {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  const diffMs = date.getTime() - Date.now();
+  const absMs = Math.abs(diffMs);
+  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 365 * 24 * 60 * 60 * 1000],
+    ["month", 30 * 24 * 60 * 60 * 1000],
+    ["week", 7 * 24 * 60 * 60 * 1000],
+    ["day", 24 * 60 * 60 * 1000],
+    ["hour", 60 * 60 * 1000],
+    ["minute", 60 * 1000],
+  ];
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  for (const [unit, unitMs] of units) {
+    if (absMs >= unitMs) return formatter.format(Math.round(diffMs / unitMs), unit);
+  }
+  return "just now";
+}
+
 // ── Custom Tooltip for dark theme ──────────────────────────────────────────
 
 function DarkTooltip({
@@ -267,10 +288,7 @@ export function ActivityHeatmap({ activityMap }) {
         </span>
       </div>
 
-      <div
-        ref={scrollRef}
-        className="overflow-x-auto"
-      >
+      <div ref={scrollRef} className="overflow-x-auto">
         <div className="w-max">
           <div className="flex gap-[3px] mb-1 ml-6" style={{ fontSize: "10px" }}>
             {monthLabels.map((m, i) => (
@@ -300,18 +318,18 @@ export function ActivityHeatmap({ activityMap }) {
             </div>
 
             {weeks.map((week, wi) => (
-            <div key={wi} className="flex flex-col gap-[3px]">
-              {week.map((day, di) => (
-                <div
-                  key={di}
-                  title={day ? `${day.date}: ${fmtFull(day.value)} tokens` : ""}
-                  className={`w-[10px] h-[10px] rounded-[2px] ${day ? getCellColor(day.value) : "bg-transparent"}`}
-                />
-              ))}
-            </div>
-          ))}
+              <div key={wi} className="flex flex-col gap-[3px]">
+                {week.map((day, di) => (
+                  <div
+                    key={di}
+                    title={day ? `${day.date}: ${fmtFull(day.value)} tokens` : ""}
+                    className={`w-[10px] h-[10px] rounded-[2px] ${day ? getCellColor(day.value) : "bg-transparent"}`}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
       </div>
 
       <div className="flex items-center gap-1 mt-2 ml-6 text-[10px] text-text-muted">
@@ -630,6 +648,11 @@ export function ApiKeyTable({ byApiKey }) {
   const sorted = useMemo(() => {
     const arr = [...filtered];
     arr.sort((a, b) => {
+      if (sortBy === "lastUsed" || sortBy === "firstUsed") {
+        const va = a[sortBy] ? new Date(a[sortBy]).getTime() : 0;
+        const vb = b[sortBy] ? new Date(b[sortBy]).getTime() : 0;
+        return sortOrder === "asc" ? va - vb : vb - va;
+      }
       const va = a[sortBy] ?? 0;
       const vb = b[sortBy] ?? 0;
       if (typeof va === "string") {
@@ -721,6 +744,12 @@ export function ApiKeyTable({ byApiKey }) {
               >
                 Cost <SortIndicator active={sortBy === "cost"} sortOrder={sortOrder} />
               </th>
+              <th
+                className="px-4 py-2.5 text-right cursor-pointer group"
+                onClick={() => toggleSort("lastUsed")}
+              >
+                Last Used <SortIndicator active={sortBy === "lastUsed"} sortOrder={sortOrder} />
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -749,11 +778,17 @@ export function ApiKeyTable({ byApiKey }) {
                 <td className="px-4 py-2.5 text-right font-mono text-amber-500">
                   {fmtCost(row.cost)}
                 </td>
+                <td
+                  className="px-4 py-2.5 text-right text-xs text-text-muted"
+                  title={row.lastUsed || "Never used"}
+                >
+                  {formatRelativeTime(row.lastUsed)}
+                </td>
               </tr>
             ))}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-text-muted">
+                <td colSpan={7} className="px-4 py-8 text-center text-text-muted">
                   No API key matches this filter.
                 </td>
               </tr>

@@ -71,6 +71,7 @@ interface ApiKey {
   isActive?: boolean;
   maxSessions?: number;
   accessSchedule?: AccessSchedule | null;
+  lastUsedAt?: string | null;
   createdAt: string;
 }
 
@@ -83,7 +84,27 @@ interface ProviderConnection {
 
 interface KeyUsageStats {
   totalRequests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost: number;
   lastUsed: string | null;
+}
+
+type ApiKeyUsageSummaryEntry = {
+  requests?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cost?: number;
+  lastUsed?: string | null;
+};
+
+interface ApiManagerPageClientProps {
+  initialKeys?: ApiKey[];
+  initialUsageByApiKey?: Record<string, ApiKeyUsageSummaryEntry>;
+  initialConnections?: ProviderConnection[];
+  initialAllowKeyReveal?: boolean;
 }
 
 interface Model {
@@ -94,13 +115,47 @@ interface Model {
 /** Tuple type for models grouped by provider: [providerName, models[]] */
 type ProviderGroup = [provider: string, models: Model[]];
 
-export default function ApiManagerPageClient() {
+function mapUsageStatsForKeys(
+  apiKeys: ApiKey[],
+  byApiKey: Record<string, ApiKeyUsageSummaryEntry> | undefined,
+  getLatestTimestamp: (...values: Array<string | null | undefined>) => string | null
+): Record<string, KeyUsageStats> {
+  const stats: Record<string, KeyUsageStats> = {};
+
+  for (const key of apiKeys) {
+    const usage = byApiKey?.[`id:${key.id}`] || byApiKey?.[`name:${key.name}`] || null;
+    const keyLastUsed =
+      typeof key.lastUsedAt === "string" && key.lastUsedAt.trim().length > 0
+        ? key.lastUsedAt
+        : null;
+
+    stats[key.id] = {
+      totalRequests: Number(usage?.requests) || 0,
+      promptTokens: Number(usage?.promptTokens) || 0,
+      completionTokens: Number(usage?.completionTokens) || 0,
+      totalTokens: Number(usage?.totalTokens) || 0,
+      cost: Number(usage?.cost) || 0,
+      lastUsed: getLatestTimestamp(
+        typeof usage?.lastUsed === "string" ? usage.lastUsed : null,
+        keyLastUsed
+      ),
+    };
+  }
+
+  return stats;
+}
+
+export default function ApiManagerPageClient({
+  initialKeys = [],
+  initialUsageByApiKey = {},
+  initialConnections = [],
+  initialAllowKeyReveal = false,
+}: ApiManagerPageClientProps) {
   const t = useTranslations("apiManager");
   const tc = useTranslations("common");
-  const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [allModels, setAllModels] = useState<Model[]>([]);
-  const [allConnections, setAllConnections] = useState<ProviderConnection[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [keys, setKeys] = useState<ApiKey[]>(initialKeys);
+  const [allModels, setAllModels] = useState<Model[] | null>(null);
+  const [allConnections, setAllConnections] = useState<ProviderConnection[]>(initialConnections);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [createdKey, setCreatedKey] = useState<string | null>(null);
@@ -109,16 +164,82 @@ export default function ApiManagerPageClient() {
   const [searchModel, setSearchModel] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [usageStats, setUsageStats] = useState<Record<string, KeyUsageStats>>({});
+  const [usageStats, setUsageStats] = useState<Record<string, KeyUsageStats>>(() =>
+    mapUsageStatsForKeys(initialKeys, initialUsageByApiKey, (...values) => {
+      return values.reduce<string | null>((latest, value) => {
+        if (!value) return latest;
+        const valueTime = new Date(value).getTime();
+        if (!Number.isFinite(valueTime)) return latest;
+        if (!latest) return value;
+        const latestTime = new Date(latest).getTime();
+        return valueTime > latestTime ? value : latest;
+      }, null);
+    })
+  );
   const [sessionCounts, setSessionCounts] = useState<Record<string, number>>({});
-  const [allowKeyReveal, setAllowKeyReveal] = useState(false);
+  const [allowKeyReveal, setAllowKeyReveal] = useState(initialAllowKeyReveal);
+  const modelList = allModels || [];
 
   const { copied, copy } = useCopyToClipboard();
 
-  useEffect(() => {
-    fetchData();
-    fetchModels();
-    fetchConnections();
+  const formatNumber = useCallback((value: number) => {
+    return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+  }, []);
+
+  const formatCost = useCallback((value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return "$0";
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: value < 0.01 ? 4 : 2,
+      maximumFractionDigits: value < 0.01 ? 6 : 2,
+    }).format(value);
+  }, []);
+
+  const formatDateTime = useCallback((value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }, []);
+
+  const formatRelativeTime = useCallback((value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+
+    const diffMs = date.getTime() - Date.now();
+    const absMs = Math.abs(diffMs);
+    const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+      ["year", 365 * 24 * 60 * 60 * 1000],
+      ["month", 30 * 24 * 60 * 60 * 1000],
+      ["week", 7 * 24 * 60 * 60 * 1000],
+      ["day", 24 * 60 * 60 * 1000],
+      ["hour", 60 * 60 * 1000],
+      ["minute", 60 * 1000],
+    ];
+
+    const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+    for (const [unit, unitMs] of units) {
+      if (absMs >= unitMs) return formatter.format(Math.round(diffMs / unitMs), unit);
+    }
+
+    return "just now";
+  }, []);
+
+  const getLatestTimestamp = useCallback((...values: Array<string | null | undefined>) => {
+    return values.reduce<string | null>((latest, value) => {
+      if (!value) return latest;
+      const valueTime = new Date(value).getTime();
+      if (!Number.isFinite(valueTime)) return latest;
+      if (!latest) return value;
+      const latestTime = new Date(latest).getTime();
+      return valueTime > latestTime ? value : latest;
+    }, null);
   }, []);
 
   const fetchModels = async () => {
@@ -133,18 +254,6 @@ export default function ApiManagerPageClient() {
     }
   };
 
-  const fetchConnections = async () => {
-    try {
-      const res = await fetch("/api/providers");
-      if (res.ok) {
-        const data = await res.json();
-        setAllConnections(data.connections || []);
-      }
-    } catch (error) {
-      console.log("Error fetching connections:", error);
-    }
-  };
-
   const fetchData = async () => {
     try {
       const res = await fetch("/api/keys");
@@ -152,55 +261,13 @@ export default function ApiManagerPageClient() {
         const data = await res.json();
         setKeys(data.keys || []);
         setAllowKeyReveal(data.allowKeyReveal === true);
-        // Fetch usage stats after keys are loaded
-        fetchUsageStats(data.keys || []);
+        setUsageStats(
+          mapUsageStatsForKeys(data.keys || [], initialUsageByApiKey, getLatestTimestamp)
+        );
         fetchSessionCounts(data.keys || []);
       }
     } catch (error) {
       console.log("Error fetching keys:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchUsageStats = async (apiKeys: ApiKey[]) => {
-    if (apiKeys.length === 0) return;
-    try {
-      // Fetch analytics (accurate aggregated counts) and recent call-logs
-      // (for lastUsed timestamps) in parallel.
-      // The previous approach matched call-logs by key.id === log.apiKeyId,
-      // but these use different ID schemes and never matched, yielding 0.
-      const [analyticsRes, logsRes] = await Promise.all([
-        fetch("/api/usage/analytics?range=all"),
-        fetch("/api/usage/call-logs?limit=1000"),
-      ]);
-
-      const analytics = analyticsRes.ok ? await analyticsRes.json() : null;
-      const byApiKey: any[] = analytics?.byApiKey || [];
-      const logs = logsRes.ok ? await logsRes.json() : [];
-
-      const stats: Record<string, KeyUsageStats> = {};
-
-      for (const key of apiKeys) {
-        // Match analytics entry by key name (reliable across both systems)
-        const analyticsMatch = byApiKey.find(
-          (entry: any) => entry.apiKeyName === key.name
-        );
-
-        // The call-logs endpoint returns entries sorted by timestamp DESC,
-        // so the first match is the most recent one.
-        const lastUsed = (logs || []).find(
-          (log: any) => log.apiKeyName === key.name
-        )?.timestamp || null;
-
-        stats[key.id] = {
-          totalRequests: analyticsMatch?.requests ?? 0,
-          lastUsed,
-        };
-      }
-      setUsageStats(stats);
-    } catch (e) {
-      console.log("Error fetching usage stats:", e);
     }
   };
 
@@ -228,6 +295,14 @@ export default function ApiManagerPageClient() {
       console.log("Error fetching session counts:", error);
     }
   };
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (initialKeys.length > 0) void fetchSessionCounts(initialKeys);
+      void fetchModels();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -398,13 +473,13 @@ export default function ApiManagerPageClient() {
   // Group models by provider
   const modelsByProvider = useMemo((): ProviderGroup[] => {
     const grouped: Record<string, Model[]> = {};
-    for (const model of allModels) {
+    for (const model of modelList) {
       const provider = model.owned_by || t("unknownProvider");
       if (!grouped[provider]) grouped[provider] = [];
       grouped[provider].push(model);
     }
     return Object.entries(grouped).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [allModels]);
+  }, [modelList, t]);
 
   // Filter models based on debounced search
   const filteredModelsByProvider = useMemo((): ProviderGroup[] => {
@@ -422,15 +497,6 @@ export default function ApiManagerPageClient() {
       )
       .filter(([, models]) => models.length > 0);
   }, [modelsByProvider, debouncedSearchModel]);
-
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-8">
-        <CardSkeleton />
-        <CardSkeleton />
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col gap-8">
@@ -485,7 +551,9 @@ export default function ApiManagerPageClient() {
               </div>
               <div>
                 <p className="text-2xl font-bold">
-                  {Object.values(usageStats).reduce((sum, s) => sum + s.totalRequests, 0)}
+                  {formatNumber(
+                    Object.values(usageStats).reduce((sum, s) => sum + s.totalRequests, 0)
+                  )}
                 </p>
                 <p className="text-xs text-text-muted">{t("totalRequests")}</p>
               </div>
@@ -499,7 +567,7 @@ export default function ApiManagerPageClient() {
                 </span>
               </div>
               <div>
-                <p className="text-2xl font-bold">{allModels.length}</p>
+                <p className="text-2xl font-bold">{modelList.length}</p>
                 <p className="text-xs text-text-muted">{t("modelsAvailable")}</p>
               </div>
             </div>
@@ -677,14 +745,29 @@ export default function ApiManagerPageClient() {
                       )}
                     </div>
                   </div>
-                  <div className="col-span-2 flex flex-col justify-center">
+                  <div className="col-span-2 flex flex-col justify-center gap-0.5">
                     <span className="text-sm font-medium tabular-nums">
-                      {stats?.totalRequests ?? 0}{" "}
+                      {formatNumber(stats?.totalRequests ?? 0)}{" "}
                       <span className="text-text-muted font-normal text-xs">{t("reqs")}</span>
                     </span>
-                    {stats?.lastUsed ? (
-                      <span className="text-[10px] text-text-muted">
-                        {t("lastUsedOn", { date: new Date(stats.lastUsed).toLocaleDateString() })}
+                    <span
+                      className="text-[10px] text-text-muted tabular-nums"
+                      title={`Input: ${formatNumber(stats?.promptTokens ?? 0)} tokens · Output: ${formatNumber(stats?.completionTokens ?? 0)} tokens · Total: ${formatNumber(stats?.totalTokens ?? 0)} tokens · Estimated cost: ${formatCost(stats?.cost ?? 0)}`}
+                    >
+                      In {formatNumber(stats?.promptTokens ?? 0)} · Out{" "}
+                      {formatNumber(stats?.completionTokens ?? 0)}
+                    </span>
+                    <span className="text-[10px] text-text-muted tabular-nums">
+                      Total {formatNumber(stats?.totalTokens ?? 0)} tokens · Est. cost{" "}
+                      {formatCost(stats?.cost ?? 0)}
+                    </span>
+                    {stats?.lastUsed || key.lastUsedAt ? (
+                      <span
+                        className="text-[10px] text-text-muted"
+                        title={formatDateTime((stats?.lastUsed || key.lastUsedAt) as string)}
+                      >
+                        Last used{" "}
+                        {formatRelativeTime((stats?.lastUsed || key.lastUsedAt) as string)}
                       </span>
                     ) : (
                       <span className="text-[10px] text-text-muted italic">{t("neverUsed")}</span>
@@ -829,7 +912,7 @@ export default function ApiManagerPageClient() {
           }}
           apiKey={editingKey}
           modelsByProvider={filteredModelsByProvider}
-          allModels={allModels}
+          allModels={modelList}
           allConnections={allConnections}
           searchModel={searchModel}
           onSearchChange={setSearchModel}

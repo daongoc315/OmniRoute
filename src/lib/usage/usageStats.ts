@@ -10,7 +10,7 @@
 import { getDbInstance } from "../db/core";
 import { getPendingRequests } from "./usageHistory";
 import { getAccountDisplayName } from "@/lib/display/names";
-import { calculateCost } from "./costCalculator";
+import { calculateCost, computeCostFromPricing, normalizeModelName } from "./costCalculator";
 
 type JsonRecord = Record<string, unknown>;
 type UsageBucket = {
@@ -37,6 +37,14 @@ type ActiveRequest = {
   count: number;
 };
 
+export type ApiKeyUsageSummary = UsageBucket & {
+  apiKeyId: string | null;
+  apiKeyName: string;
+  firstUsed: string | null;
+  lastUsed: string | null;
+  totalTokens: number;
+};
+
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
@@ -54,12 +62,157 @@ function toStringOrEmpty(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+const DEFAULT_USAGE_STATS_WINDOW_DAYS = 30;
+const MAX_USAGE_DB_ROWS = 20000;
+
+function clampPositiveInteger(value: unknown, fallback: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(Math.max(Math.floor(parsed), 1), max);
+}
+
+function emptyApiKeyUsage(apiKeyId: string | null, apiKeyName: string): ApiKeyUsageSummary {
+  return {
+    apiKeyId,
+    apiKeyName,
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cost: 0,
+    firstUsed: null,
+    lastUsed: null,
+    totalTokens: 0,
+  };
+}
+
+function ensureApiKeyUsageBucket(
+  target: Record<string, ApiKeyUsageSummary>,
+  apiKeyId: string | null,
+  apiKeyName: string | null
+) {
+  const normalizedId = apiKeyId || null;
+  const normalizedName = apiKeyName || normalizedId || "unknown";
+  const stableKey = normalizedId ? `id:${normalizedId}` : `name:${normalizedName}`;
+  if (!target[stableKey]) {
+    target[stableKey] = emptyApiKeyUsage(normalizedId, normalizedName);
+  }
+  return target[stableKey];
+}
+
+export async function getApiKeyUsageSummary(options: { sinceIso?: string | null } = {}) {
+  const db = getDbInstance();
+  const { getPricingForModel } = await import("@/lib/localDb");
+  const whereClause = options.sinceIso ? "WHERE timestamp >= @since" : "";
+  const apiKeyCondition = whereClause ? "AND" : "WHERE";
+  const rows = db
+    .prepare(
+      `
+      SELECT
+        api_key_id AS apiKeyId,
+        api_key_name AS apiKeyName,
+        provider,
+        model,
+        COUNT(*) AS requests,
+        SUM(COALESCE(tokens_input, 0)) AS promptTokens,
+        SUM(COALESCE(tokens_output, 0)) AS completionTokens,
+        SUM(COALESCE(tokens_cache_read, 0)) AS cacheReadTokens,
+        SUM(COALESCE(tokens_cache_creation, 0)) AS cacheCreationTokens,
+        SUM(COALESCE(tokens_reasoning, 0)) AS reasoningTokens,
+        MIN(timestamp) AS firstUsed,
+        MAX(timestamp) AS lastUsed
+      FROM usage_history
+      ${whereClause}
+      ${apiKeyCondition} (api_key_id IS NOT NULL OR api_key_name IS NOT NULL)
+      GROUP BY api_key_id, api_key_name, provider, model
+      ORDER BY lastUsed DESC
+    `
+    )
+    .all(options.sinceIso ? { since: options.sinceIso } : {}) as unknown[];
+
+  const byApiKey: Record<string, ApiKeyUsageSummary> = {};
+  const pricingCache = new Map<string, Promise<Record<string, unknown> | null>>();
+
+  for (const rowRaw of rows) {
+    const row = asRecord(rowRaw);
+    const apiKeyId = toStringOrEmpty(row.apiKeyId) || null;
+    const apiKeyName = toStringOrEmpty(row.apiKeyName) || null;
+    if (!apiKeyId && !apiKeyName) continue;
+
+    const provider = toStringOrEmpty(row.provider) || "unknown";
+    const model = toStringOrEmpty(row.model) || "unknown";
+    const promptTokens = toNumber(row.promptTokens);
+    const completionTokens = toNumber(row.completionTokens);
+    const entryTokens = {
+      input: promptTokens,
+      output: completionTokens,
+      cacheRead: toNumber(row.cacheReadTokens),
+      cacheCreation: toNumber(row.cacheCreationTokens),
+      reasoning: toNumber(row.reasoningTokens),
+    };
+    const pricingKey = `${provider}\u0000${model}`;
+    let pricingPromise = pricingCache.get(pricingKey);
+    if (!pricingPromise) {
+      pricingPromise = (async () => {
+        let pricing = await getPricingForModel(provider, model);
+        if (!pricing) {
+          const normalized = normalizeModelName(model);
+          if (normalized !== model) pricing = await getPricingForModel(provider, normalized);
+        }
+        return pricing && typeof pricing === "object" && !Array.isArray(pricing)
+          ? (pricing as Record<string, unknown>)
+          : null;
+      })();
+      pricingCache.set(pricingKey, pricingPromise);
+    }
+    const entryCost = computeCostFromPricing(await pricingPromise, entryTokens);
+
+    const bucket = ensureApiKeyUsageBucket(byApiKey, apiKeyId, apiKeyName);
+    bucket.requests += toNumber(row.requests);
+    bucket.promptTokens += promptTokens;
+    bucket.completionTokens += completionTokens;
+    bucket.totalTokens += promptTokens + completionTokens;
+    bucket.cost += entryCost;
+    const firstUsed = toStringOrEmpty(row.firstUsed) || null;
+    const lastUsed = toStringOrEmpty(row.lastUsed) || null;
+    if (firstUsed && (!bucket.firstUsed || new Date(firstUsed) < new Date(bucket.firstUsed))) {
+      bucket.firstUsed = firstUsed;
+    }
+    if (lastUsed && (!bucket.lastUsed || new Date(lastUsed) > new Date(bucket.lastUsed))) {
+      bucket.lastUsed = lastUsed;
+    }
+  }
+
+  return byApiKey;
+}
+
+function getBoundedUsageRows(options: { sinceIso?: string | null; maxRows?: number } = {}) {
+  const db = getDbInstance();
+  const maxRows = clampPositiveInteger(options.maxRows, MAX_USAGE_DB_ROWS, MAX_USAGE_DB_ROWS);
+  const sinceIso =
+    options.sinceIso ||
+    new Date(Date.now() - DEFAULT_USAGE_STATS_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  return db
+    .prepare(
+      `
+      SELECT * FROM (
+        SELECT *
+        FROM usage_history
+        WHERE timestamp >= @sinceIso
+        ORDER BY timestamp DESC
+        LIMIT @maxRows
+      )
+      ORDER BY timestamp ASC
+    `
+    )
+    .all({ sinceIso, maxRows }) as unknown[];
+}
+
 /**
  * Get aggregated usage stats.
  */
-export async function getUsageStats() {
-  const db = getDbInstance();
-  const rows = db.prepare("SELECT * FROM usage_history ORDER BY timestamp ASC").all() as unknown[];
+export async function getUsageStats(options: { sinceIso?: string | null; maxRows?: number } = {}) {
+  const rows = getBoundedUsageRows(options);
 
   const { getProviderConnections } = await import("@/lib/localDb");
   let allConnections: unknown[] = [];
@@ -144,7 +297,6 @@ export async function getUsageStats() {
     const connectionId = toStringOrEmpty(row.connection_id) || null;
     const apiKeyId = toStringOrEmpty(row.api_key_id) || null;
     const apiKeyName = toStringOrEmpty(row.api_key_name) || null;
-
     const promptTokens = toNumber(row.tokens_input);
     const completionTokens = toNumber(row.tokens_output);
     const entryTime = new Date(timestamp);
@@ -235,7 +387,8 @@ export async function getUsageStats() {
       }
     }
 
-    // By API key
+    // By API key — intentionally bounded to the same rows as the rest of getUsageStats().
+    // Full range API-key analytics are served by /api/usage/analytics via getApiKeyUsageSummary().
     if (apiKeyId || apiKeyName) {
       const keyName = apiKeyName || apiKeyId || "unknown";
       const keyId = apiKeyId || null;

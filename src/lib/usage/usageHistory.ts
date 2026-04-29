@@ -258,13 +258,26 @@ export function clearPendingRequests() {
  * Returns an object compatible with the old LowDB interface.
  * Only `api/usage/analytics/route.js` uses this — it reads `db.data.history`.
  */
-export async function getUsageDb(sinceIso?: string | null) {
+export async function getUsageDb(sinceIso?: string | null, options: { maxRows?: number } = {}) {
   const db = getDbInstance();
-  const rows = sinceIso
-    ? db
-        .prepare("SELECT * FROM usage_history WHERE timestamp >= ? ORDER BY timestamp ASC")
-        .all(sinceIso)
-    : db.prepare("SELECT * FROM usage_history ORDER BY timestamp ASC").all();
+  const maxRows =
+    Number.isFinite(Number(options.maxRows)) && Number(options.maxRows) > 0
+      ? Math.min(Number(options.maxRows), 50000)
+      : 20000;
+  const rows = db
+    .prepare(
+      `
+      SELECT * FROM (
+        SELECT *
+        FROM usage_history
+        WHERE timestamp >= @sinceIso
+        ORDER BY timestamp DESC
+        LIMIT @maxRows
+      )
+      ORDER BY timestamp ASC
+    `
+    )
+    .all({ sinceIso: sinceIso || new Date(0).toISOString(), maxRows });
 
   const history = rows.map((row) => {
     const r = asRecord(row);

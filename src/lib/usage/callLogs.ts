@@ -524,6 +524,42 @@ export function trimCallLogsToMaxRows(maxRows = getCallLogsTableMaxRows()) {
   return { deletedRows, deletedArtifacts };
 }
 
+export function getFallbackTransparencyMetrics(options: { sinceIso?: string | null } = {}) {
+  const db = getDbInstance();
+  const whereClause = options.sinceIso ? "WHERE timestamp >= @since" : "";
+  const row = db
+    .prepare(
+      `
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN requested_model IS NOT NULL AND requested_model != '' THEN 1 ELSE 0 END) as with_requested,
+        SUM(CASE
+          WHEN requested_model IS NOT NULL
+           AND requested_model != ''
+           AND model IS NOT NULL
+           AND requested_model != model
+          THEN 1 ELSE 0 END
+        ) as fallbacks
+      FROM call_logs
+      ${whereClause}
+    `
+    )
+    .get(options.sinceIso ? { since: options.sinceIso } : {}) as
+    | { total?: number; with_requested?: number; fallbacks?: number }
+    | undefined;
+
+  const total = Number(row?.total || 0);
+  const withRequested = Number(row?.with_requested || 0);
+  const fallbackCount = Number(row?.fallbacks || 0);
+
+  return {
+    fallbackCount,
+    fallbackRatePct:
+      withRequested > 0 ? Number(((fallbackCount / withRequested) * 100).toFixed(2)) : 0,
+    requestedModelCoveragePct: total > 0 ? Number(((withRequested / total) * 100).toFixed(2)) : 0,
+  };
+}
+
 function mapSummaryRow(row: CallLogSummaryRow) {
   const detailState = normalizeDetailState(row.detail_state);
   const provider = row.provider;
@@ -823,9 +859,7 @@ export async function getCallLogById(id: string) {
        LEFT JOIN provider_nodes pn ON pn.id = cl.provider
        WHERE cl.id = ?`
     )
-    .get(id) as
-    | CallLogSummaryRow
-    | undefined;
+    .get(id) as CallLogSummaryRow | undefined;
   if (!row) return null;
 
   const entry = mapSummaryRow(row);
