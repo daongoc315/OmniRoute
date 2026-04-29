@@ -6,6 +6,7 @@ const {
   ensureOpenAIStoreSessionFallback,
   getClaudeCodeCompatibleRequestDefaults,
   normalizeProviderSpecificData,
+  sanitizeProviderSpecificDataForResponse,
 } = await import("../../src/lib/providers/requestDefaults.ts");
 
 test("buildOpenAIStoreSessionId normalizes external and generated session ids", () => {
@@ -68,5 +69,35 @@ test("normalizeProviderSpecificData keeps only boolean CC-compatible 1M request 
   });
   assert.deepEqual(stripped?.requestDefaults, {
     customFlag: "keep-me",
+  });
+});
+
+test("sanitizeProviderSpecificDataForResponse strips nested provider secrets", () => {
+  const sanitized = sanitizeProviderSpecificDataForResponse({
+    clientId: "oFQi8yZO5yq_37FZ7H0JImFwLXNvdXRoZWFzdC0x",
+    clientSecret: "kiro-client-secret",
+    copilotToken: "copilot-token-secret",
+    access_token: "access-token-secret",
+    refreshToken: "refresh-token-secret",
+    awsSessionToken: "aws-session-token-secret",
+    privateKey: "private-key-secret",
+    oauth: {
+      clientSecret: "nested-client-secret",
+      tenantId: "tenant-1",
+    },
+    headers: {
+      authorizationToken: "nested-token-secret",
+      organization: "org-1",
+    },
+    region: "ap-southeast-1",
+    requestDefaults: { reasoningEffort: "high" },
+  });
+
+  assert.deepEqual(sanitized, {
+    clientId: "oFQi8yZO5yq_37FZ7H0JImFwLXNvdXRoZWFzdC0x",
+    oauth: { tenantId: "tenant-1" },
+    headers: { organization: "org-1" },
+    region: "ap-southeast-1",
+    requestDefaults: { reasoningEffort: "high" },
   });
 });

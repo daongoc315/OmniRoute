@@ -154,16 +154,54 @@ export function normalizeProviderSpecificData(
 }
 
 export function sanitizeProviderSpecificDataForResponse(value: unknown): JsonRecord | undefined {
-  const record = asRecord(value);
+  const record = sanitizeProviderSpecificDataRecord(asRecord(value));
   if (Object.keys(record).length === 0) return undefined;
 
-  const sanitized: JsonRecord = { ...record };
-  delete sanitized.consoleApiKey;
-  delete sanitized.secretAccessKey;
-  delete sanitized.awsSecretAccessKey;
-  delete sanitized.sessionToken;
-  delete sanitized.awsSessionToken;
+  return record;
+}
+
+function sanitizeProviderSpecificDataRecord(record: JsonRecord): JsonRecord {
+  const sanitized: JsonRecord = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (isSensitiveProviderSpecificDataKey(key)) continue;
+    const sanitizedEntry = sanitizeProviderSpecificDataValue(entry);
+    if (sanitizedEntry !== undefined) {
+      sanitized[key] = sanitizedEntry;
+    }
+  }
+
   return sanitized;
+}
+
+function sanitizeProviderSpecificDataValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeProviderSpecificDataValue(entry));
+  }
+
+  if (value && typeof value === "object") {
+    const sanitized = sanitizeProviderSpecificDataRecord(value as JsonRecord);
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  }
+
+  return value;
+}
+
+function isSensitiveProviderSpecificDataKey(key: string): boolean {
+  const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!normalized) return false;
+
+  if (
+    normalized.includes("secret") ||
+    normalized.includes("token") ||
+    normalized.includes("password") ||
+    normalized.includes("credential") ||
+    normalized.includes("privatekey") ||
+    normalized.includes("apikey")
+  ) {
+    return true;
+  }
+
+  return normalized === "key" || normalized.endsWith("key");
 }
 
 export function isOpenAIResponsesStoreEnabled(providerSpecificData: unknown): boolean {

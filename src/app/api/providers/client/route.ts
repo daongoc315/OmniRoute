@@ -1,16 +1,32 @@
 import { NextResponse } from "next/server";
+import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { getProviderConnections } from "@/lib/localDb";
+import { sanitizeProviderSpecificDataForResponse } from "@/lib/providers/requestDefaults";
 
-// GET /api/providers/client - List all connections for client (includes sensitive fields for sync)
-export async function GET() {
+const SENSITIVE_PROVIDER_FIELDS = new Set(["accessToken", "refreshToken", "idToken", "apiKey"]);
+
+function redactSensitiveProviderFields(connection: Record<string, unknown>) {
+  const redacted = Object.fromEntries(
+    Object.entries(connection).filter(([key]) => !SENSITIVE_PROVIDER_FIELDS.has(key))
+  );
+
+  redacted.providerSpecificData = sanitizeProviderSpecificDataForResponse(
+    connection.providerSpecificData
+  );
+  return redacted;
+}
+
+// GET /api/providers/client - List provider connection metadata for authenticated clients.
+// Raw credentials are intentionally excluded; sync/export paths must use dedicated tokens.
+export async function GET(request: Request) {
+  const authError = await requireManagementAuth(request);
+  if (authError) return authError;
+
   try {
     const connections = await getProviderConnections();
-
-    // Include sensitive fields for sync to cloud (only accessible from same origin)
-    const clientConnections = connections.map((c) => ({
-      ...c,
-      // Don't hide sensitive fields here since this is for internal sync
-    }));
+    const clientConnections = connections.map((connection) =>
+      redactSensitiveProviderFields(connection as Record<string, unknown>)
+    );
 
     return NextResponse.json({ connections: clientConnections });
   } catch (error) {

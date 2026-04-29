@@ -60,8 +60,11 @@ test("config sync bundle is deterministic, strips auth settings, and ignores vol
     authType: "apikey",
     name: "Primary OpenAI",
     apiKey: "sk-live-secret",
+    accessToken: "access-token-secret",
+    refreshToken: "refresh-token-secret",
+    idToken: "id-token-secret",
     defaultModel: "gpt-4o-mini",
-    providerSpecificData: { region: "us" },
+    providerSpecificData: { region: "us", secret: "provider-specific-secret" },
   });
   await modelsDb.setModelAlias("smart-default", "openai/gpt-4o-mini");
   await combosDb.createCombo({
@@ -79,7 +82,12 @@ test("config sync bundle is deterministic, strips auth settings, and ignores vol
   assert.equal(first.bundle.settings.password, undefined);
   assert.equal(first.bundle.settings.requireLogin, undefined);
   assert.equal(first.bundle.settings.cloudEnabled, undefined);
-  assert.equal(first.bundle.providerConnections[0].apiKey, "sk-live-secret");
+  assert.equal(first.bundle.providerConnections[0].apiKey, undefined);
+  assert.equal(first.bundle.providerConnections[0].accessToken, undefined);
+  assert.equal(first.bundle.providerConnections[0].refreshToken, undefined);
+  assert.equal(first.bundle.providerConnections[0].idToken, undefined);
+  assert.equal(first.bundle.providerConnections[0].providerSpecificData, undefined);
+  assert.equal(first.bundle.apiKeys[0].key, undefined);
   assert.equal(first.bundle.modelAliases["smart-default"], "openai/gpt-4o-mini");
 
   await providersDb.updateProviderConnection((connection as any).id, {

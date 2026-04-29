@@ -75,16 +75,11 @@ function sanitizeProviderConnectionForSync(connection: unknown): JsonRecord {
     "globalPriority",
     "defaultModel",
     "isActive",
-    "accessToken",
-    "refreshToken",
     "expiresAt",
     "expiresIn",
     "tokenType",
     "scope",
-    "idToken",
     "projectId",
-    "apiKey",
-    "providerSpecificData",
     "group",
   ]);
 }
@@ -114,7 +109,6 @@ function sanitizeApiKeyForSync(apiKey: unknown): JsonRecord {
   return pickDefined(record, [
     "id",
     "name",
-    "key",
     "machineId",
     "allowedModels",
     "allowedConnections",

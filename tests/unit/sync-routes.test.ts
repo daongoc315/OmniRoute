@@ -20,6 +20,7 @@ const compliance = await import("../../src/lib/compliance/index.ts");
 const syncTokensRoute = await import("../../src/app/api/sync/tokens/route.ts");
 const syncTokenByIdRoute = await import("../../src/app/api/sync/tokens/[id]/route.ts");
 const syncBundleRoute = await import("../../src/app/api/sync/bundle/route.ts");
+const providersClientRoute = await import("../../src/app/api/providers/client/route.ts");
 const localDb = await import("../../src/lib/localDb.ts");
 
 function resetStorage() {
@@ -68,6 +69,43 @@ test("sync token management requires management auth when login is enabled", asy
   );
 
   assert.equal(response.status, 401);
+});
+
+test("providers client route requires management auth and redacts raw credentials", async () => {
+  await localDb.createProviderConnection({
+    provider: "openai",
+    authType: "apikey",
+    name: "Primary OpenAI",
+    apiKey: "sk-live-provider-secret",
+    accessToken: "access-token-secret",
+    refreshToken: "refresh-token-secret",
+    idToken: "id-token-secret",
+    providerSpecificData: {
+      secret: "provider-specific-secret",
+      clientSecret: "client-secret",
+      tag: "prod",
+    },
+    defaultModel: "gpt-4o-mini",
+  });
+
+  const unauthenticatedResponse = await providersClientRoute.GET(
+    new Request("http://localhost/api/providers/client")
+  );
+  assert.equal(unauthenticatedResponse.status, 401);
+
+  const authenticatedResponse = await providersClientRoute.GET(
+    await makeManagementSessionRequest("http://localhost/api/providers/client")
+  );
+  assert.equal(authenticatedResponse.status, 200);
+
+  const body = (await authenticatedResponse.json()) as any;
+  assert.equal(body.connections.length, 1);
+  assert.equal(body.connections[0].name, "Primary OpenAI");
+  assert.equal(body.connections[0].apiKey, undefined);
+  assert.equal(body.connections[0].accessToken, undefined);
+  assert.equal(body.connections[0].refreshToken, undefined);
+  assert.equal(body.connections[0].idToken, undefined);
+  assert.deepEqual(body.connections[0].providerSpecificData, { tag: "prod" });
 });
 
 test("sync token routes issue, list, use and revoke dedicated tokens", async () => {
@@ -163,7 +201,7 @@ test("sync token routes issue, list, use and revoke dedicated tokens", async () 
   );
   assert.equal(revokedBundleResponse.status, 401);
 
-  const auditActions = compliance.getAuditLog().map((entry) => entry.action);
+  const auditActions = compliance.getAuditLog().map((entry: any) => entry.action);
   assert.equal(auditActions.includes("sync.token.created"), true);
   assert.equal(auditActions.includes("sync.token.revoked"), true);
 });
